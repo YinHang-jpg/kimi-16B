@@ -4,18 +4,24 @@ Run all commands from this directory (`Moonlight-16B-A3B`).
 
 ## Ascend NPU via GitHub only (recommended)
 
-`torch` / `torch_npu` are assumed already installed.  
-All other deps are vendored under `offline_wheels/` in this repo.
+Vendored under `offline_wheels/`:
+- `torch==2.10.0+cpu` (split into `.whl.partXX` because GitHub max file is 100MB)
+- `torch_npu==2.10.0`
+- HuggingFace training stack (`transformers`, `accelerate`, `peft`, ...)
 
 ```bash
 source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh
 cd /path/to/Moonlight-16B-A3B
 git pull
+
+python3.12 -m venv .venv
+source .venv/bin/activate
+
 bash install_offline.sh
 python scripts/smoke_test.py
 ```
 
-`install_offline.sh` picks `linux_x86_64` or `linux_aarch64` from `uname -m` and installs with `--no-index` (no PyPI).
+`install_offline.sh` rebuilds split torch wheels, then `pip install --no-index` for the matching arch (`linux_x86_64` / `linux_aarch64`).
 
 ## Local (CPU, no NPU)
 

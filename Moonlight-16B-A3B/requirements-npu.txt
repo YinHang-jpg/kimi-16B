@@ -1,3 +1,3 @@
-# Ascend target. torch + torch_npu are assumed preinstalled on the machine.
-# Prefer: bash install_offline.sh
+# Ascend target. Prefer: bash install_offline.sh
+# That installs torch(+cpu) + torch_npu + the packages below from offline_wheels/.
 -r requirements.txt
