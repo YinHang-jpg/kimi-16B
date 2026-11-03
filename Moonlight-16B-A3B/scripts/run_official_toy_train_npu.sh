@@ -6,6 +6,9 @@ cd "$(dirname "$0")/.."
 
 source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh 2>/dev/null || true
 
+# Rebuild dataset Arrow if only split parts are present (GitHub <100MB limit).
+bash scripts/reassemble_toy_prefetch.sh
+
 PYTHON_BIN="${PYTHON_BIN:-python}"
 DATA_DIR="${DATA_DIR:-toy_prefetch/openwebtext-100k}"
 TOK_DIR="${TOK_DIR:-toy_prefetch/Qwen2.5-0.5B-tokenizer}"

@@ -13,7 +13,8 @@ __pycache__/
 *.tar.gz
 
 toy_cache/
-toy_prefetch/
 logs/
 *.bin
 
+# Rebuilt from *.arrow.partXX after git pull; do not re-commit
+toy_prefetch/**/*.arrow

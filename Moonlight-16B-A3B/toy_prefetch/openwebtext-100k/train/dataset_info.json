@@ -1,0 +1,38 @@
+{
+  "builder_name": "parquet",
+  "citation": "",
+  "config_name": "default",
+  "dataset_name": "openwebtext-100k",
+  "dataset_size": 497257202,
+  "description": "",
+  "download_checksums": {
+    "hf://datasets/Elriggs/openwebtext-100k@2b7bfd980d5227806de62ac735f40712a4881273/data/train-00000-of-00001-10a4de027237eace.parquet": {
+      "num_bytes": 302558045,
+      "checksum": null
+    }
+  },
+  "download_size": 302558045,
+  "features": {
+    "text": {
+      "dtype": "string",
+      "_type": "Value"
+    }
+  },
+  "homepage": "",
+  "license": "",
+  "size_in_bytes": 799815247,
+  "splits": {
+    "train": {
+      "name": "train",
+      "num_bytes": 497257202,
+      "num_examples": 100000,
+      "dataset_name": "openwebtext-100k"
+    }
+  },
+  "version": {
+    "version_str": "0.0.0",
+    "major": 0,
+    "minor": 0,
+    "patch": 0
+  }
+}
