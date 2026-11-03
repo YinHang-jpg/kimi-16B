@@ -350,8 +350,16 @@ def main():
     disable_compile = not args.enable_torch_compile
     zeropower_fn = build_zeropower(disable_compile)
 
-    Path("logs").mkdir(exist_ok=True)
-    logger.add(f"logs/train_{args.model}_{args.optimizer}_lr{args.lr}.log")
+    repo_root = Path(__file__).resolve().parents[1]
+    log_dir = repo_root / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"train_{args.model}_{args.optimizer}_lr{args.lr}.log"
+    logger.add(str(log_path))
+    logger.info(f"Logging to {log_path}")
+
+    cache_dir = args.cache_dir
+    if not Path(cache_dir).is_absolute():
+        cache_dir = str(repo_root / cache_dir)
 
     model, train_loader = get_model_and_dataloader(
         args.model,
@@ -359,7 +367,7 @@ def main():
         args.hidden_size,
         args.local_data_dir or None,
         args.tokenizer_path or None,
-        args.cache_dir,
+        cache_dir,
     )
     optimizer = get_optimizer(
         args.optimizer, model, lr=args.lr, wd=args.wd, zeropower_fn=zeropower_fn
