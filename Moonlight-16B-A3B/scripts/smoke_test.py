@@ -92,15 +92,14 @@ def check_model_generate(model_dir: Path, max_new_tokens: int) -> None:
 
 
 def main() -> int:
-    repo_root = Path(__file__).resolve().parents[1]
-    default_model = repo_root / "Moonlight-16B-A3B"
+    model_root = Path(__file__).resolve().parents[1]
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--model-dir",
         type=Path,
-        default=default_model,
-        help="Path to Moonlight-16B-A3B weights/config",
+        default=model_root,
+        help="Path to Moonlight-16B-A3B weights/config (default: this package dir)",
     )
     parser.add_argument(
         "--load-model",

@@ -1,6 +1,8 @@
 # Environment setup
 
-## Local (CPU, no NPU) — this machine
+Run all commands from this directory (`Moonlight-16B-A3B`).
+
+## Local (CPU, no NPU)
 
 ```bash
 python -m venv .venv
@@ -25,8 +27,9 @@ python scripts/smoke_test.py --load-model
 
 ```bash
 source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh
-python3.12 -m venv ~/venvs/moonlight
-source ~/venvs/moonlight/bin/activate
+cd /path/to/Moonlight-16B-A3B
+python3.12 -m venv .venv
+source .venv/bin/activate
 pip install -U pip setuptools wheel
 pip install -r requirements-npu.txt
 python scripts/smoke_test.py

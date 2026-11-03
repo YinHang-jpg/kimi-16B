@@ -1,6 +1,6 @@
 # Shared training / inference deps (CPU or NPU host).
 # On Ascend: install torch(+cpu) + torch_npu first, then this file.
-# See requirements-npu.txt and README for the Ascend pin set.
+# See requirements-npu.txt and SETUP.md for the Ascend pin set.
 
 transformers==4.48.2
 accelerate==1.3.0

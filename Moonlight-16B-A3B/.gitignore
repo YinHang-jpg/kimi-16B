@@ -1,0 +1,12 @@
+# Model weights (too large for GitHub)
+*.safetensors
+
+# Local Python env
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+.DS_Store
