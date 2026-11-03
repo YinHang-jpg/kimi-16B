@@ -72,3 +72,5 @@ echo "== installing remaining requirements =="
 
 echo "== done =="
 echo "Next: python scripts/smoke_test.py"
+
+# Note: this file must use LF line endings for Linux bash.
