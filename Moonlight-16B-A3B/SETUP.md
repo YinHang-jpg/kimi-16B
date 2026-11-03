@@ -38,3 +38,13 @@ python scripts/smoke_test.py
 ```
 
 If `torch-npu==2.10.0` fails on CANN 9.0.1, try `torch-npu==2.10.0.post2`.
+
+## Offline install (no PyPI access)
+
+Wheels under `offline_wheels/` can be installed without network:
+
+```bash
+pip install --no-index --find-links=./offline_wheels accelerate==1.3.0
+```
+
+If other packages also time out, download their Linux/`py3-none-any` wheels on a networked machine into `offline_wheels/`, sync, then install the same way.
