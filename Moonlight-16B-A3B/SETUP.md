@@ -32,3 +32,15 @@ pip install -U pip setuptools wheel
 pip install -r requirements-cpu.txt
 python scripts/smoke_test.py
 ```
+
+## Official toy Muon training (what Moonshot actually open-sourced)
+
+Read `docs/REPRODUCIBILITY.md` first. Full 16B / 5.7T training is **not** open-sourced.
+
+```bash
+# networked machine: prefetch HF dataset + tokenizer, then copy toy_prefetch/ over
+python scripts/prefetch_official_toy_data.py
+
+# NPU host:
+bash scripts/run_official_toy_train_npu.sh
+```

@@ -1,0 +1,6 @@
+Upstream: https://github.com/MoonshotAI/Moonlight
+Files vendored:
+  - examples/toy_train.py
+  - requirements.txt
+Fetched from branch/ref: master (raw.githubusercontent.com)
+Purpose: keep an unmodified copy of the officially released Muon toy training entrypoint.
