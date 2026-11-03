@@ -38,9 +38,9 @@ python scripts/smoke_test.py
 Read `docs/REPRODUCIBILITY.md` first. Full 16B / 5.7T training is **not** open-sourced.
 
 ```bash
-# networked machine: prefetch HF dataset + tokenizer, then copy toy_prefetch/ over
-python scripts/prefetch_official_toy_data.py
-
+# toy_prefetch/ is vendored in this repo (Arrow file split into *.partXX).
 # NPU host:
+git pull
 bash scripts/run_official_toy_train_npu.sh
+# (script auto-runs scripts/reassemble_toy_prefetch.sh first)
 ```
