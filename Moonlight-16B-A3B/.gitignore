@@ -1,6 +1,10 @@
 # Model weights (too large for GitHub)
 *.safetensors
 
+# Offline wheel bundles (scp separately; too large for GitHub)
+offline_wheels/
+*.tar.gz
+
 # Local Python env
 .venv/
 venv/

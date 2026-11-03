@@ -2,49 +2,44 @@
 
 Run all commands from this directory (`Moonlight-16B-A3B`).
 
-## Local (CPU, no NPU)
+## Ascend NPU (air-gapped) — recommended
 
-```bash
-python -m venv .venv
-# Windows:
-.venv\Scripts\activate
-# Linux/macOS:
-# source .venv/bin/activate
-
-pip install -U pip setuptools wheel
-pip install -r requirements-cpu.txt
-python scripts/smoke_test.py
-```
-
-Default smoke test checks imports + tokenizer/config only.  
-Full weight load (needs lots of RAM / NPU):
-
-```bash
-python scripts/smoke_test.py --load-model
-```
-
-## Ascend NPU target (CANN 9.0.1, Python 3.12)
+`torch` / `torch_npu` are assumed already installed on the machine.  
+Only the HuggingFace training stack is shipped as offline wheels.
 
 ```bash
 source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh
 cd /path/to/Moonlight-16B-A3B
-python3.12 -m venv .venv
-source .venv/bin/activate
-pip install -U pip setuptools wheel
-pip install -r requirements-npu.txt
+
+# After copying offline_wheels/ here (see below):
+bash install_offline.sh
 python scripts/smoke_test.py
-# optional:
+# optional full load:
 # python scripts/smoke_test.py --load-model
 ```
 
-If `torch-npu==2.10.0` fails on CANN 9.0.1, try `torch-npu==2.10.0.post2`.
+### Getting `offline_wheels/` onto the machine
 
-## Offline install (no PyPI access)
-
-Wheels under `offline_wheels/` can be installed without network:
+These wheels are too large for GitHub. On a networked PC they live under
+`Moonlight-16B-A3B/offline_wheels/linux_<arch>/`. Pack and copy:
 
 ```bash
-pip install --no-index --find-links=./offline_wheels accelerate==1.3.0
+# on networked machine (example)
+tar -czf moonlight-offline-wheels.tar.gz -C Moonlight-16B-A3B offline_wheels install_offline.sh requirements.txt
+
+# on NPU host, inside Moonlight-16B-A3B:
+tar -xzf moonlight-offline-wheels.tar.gz
+bash install_offline.sh
 ```
 
-If other packages also time out, download their Linux/`py3-none-any` wheels on a networked machine into `offline_wheels/`, sync, then install the same way.
+`install_offline.sh` auto-selects `linux_x86_64` or `linux_aarch64` via `uname -m`.
+
+## Local (CPU, no NPU)
+
+```bash
+python -m venv .venv
+# Windows: .venv\Scripts\activate
+pip install -U pip setuptools wheel
+pip install -r requirements-cpu.txt
+python scripts/smoke_test.py
+```
