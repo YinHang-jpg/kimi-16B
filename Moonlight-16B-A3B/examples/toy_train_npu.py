@@ -65,12 +65,39 @@ class MoonDataset(Dataset):
         cache_path = os.path.join(self.cache_dir, f"{self.dataset_name}.bin")
         if os.path.exists(cache_path):
             self.tokens = torch.load(cache_path, weights_only=False)
-        else:
-            for text in tqdm(self.texts, desc="Tokenizing texts"):
+            return
+
+        texts = self.texts
+        total = len(texts)
+        # Non-TTY terminals (common over SSH/IDE) make tqdm print a new line
+        # per update and flood the screen. Use in-place bar only on real TTYs;
+        # otherwise log coarse percent updates.
+        use_tqdm = sys.stderr.isatty()
+        if use_tqdm:
+            iterator = tqdm(
+                texts,
+                desc="Tokenizing texts",
+                total=total,
+                dynamic_ncols=True,
+                mininterval=1.0,
+                file=sys.stderr,
+            )
+            for text in iterator:
                 encoded = self.tokenizer.encode(text, add_special_tokens=True)
                 self.tokens.extend(encoded)
-            os.makedirs(self.cache_dir, exist_ok=True)
-            torch.save(self.tokens, cache_path)
+        else:
+            logger.info(f"Tokenizing texts: 0/{total} (0.0%)")
+            step = max(1, total // 100)  # ~1% updates
+            for i, text in enumerate(texts):
+                encoded = self.tokenizer.encode(text, add_special_tokens=True)
+                self.tokens.extend(encoded)
+                done = i + 1
+                if done % step == 0 or done == total:
+                    pct = 100.0 * done / total
+                    logger.info(f"Tokenizing texts: {done}/{total} ({pct:.1f}%)")
+
+        os.makedirs(self.cache_dir, exist_ok=True)
+        torch.save(self.tokens, cache_path)
 
     def __len__(self):
         return len(self.tokens) // self.max_length
