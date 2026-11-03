@@ -1,0 +1,6 @@
+# Local / CI smoke environment (no NPU).
+# Pin torch to the same major line as the Ascend stack for API parity.
+
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.10.0
+-r requirements.txt

@@ -1,0 +1,7 @@
+# Ascend target (CANN 9.0.1 + Python 3.12). Install AFTER sourcing CANN env.
+# torch must be the CPU wheel; NPU comes from torch_npu.
+
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.10.0
+torch-npu==2.10.0
+-r requirements.txt
