@@ -4,7 +4,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh 2>/dev/null || true
+# Align OPP/kernel paths (910B3 + cann-9.0.1 often point OPP at a tree without kernel binaries).
+# shellcheck disable=SC1091
+source scripts/fix_cann_env.sh
 
 # Rebuild dataset Arrow if only split parts are present (GitHub <100MB limit).
 bash scripts/reassemble_toy_prefetch.sh
