@@ -4,26 +4,23 @@
 Upstream (unmodified copy):
   third_party/MoonshotAI-Moonlight/examples/toy_train.py
 
-PATCHES vs upstream (only these; optimizer math is unchanged):
+PATCHES vs upstream (optimizer math unchanged):
   1. Optional `import torch_npu` for Ascend.
   2. Device selection: npu > cuda > cpu.
-  3. `--disable-torch-compile` (default on NPU) because Ascend often lacks
-     full torch.compile support for the Newton-Schulz kernel path.
+  3. Disable torch.compile by default on NPU.
   4. `--local-data-dir` / `--tokenizer-path` for offline caches.
-  5. `torch.load(..., weights_only=False)` for newer PyTorch compatibility
-     when loading the token cache `.bin` produced by this script.
-
-Official CLI (from upstream README) still applies, e.g.:
-  python examples/toy_train_npu.py --model qwen --optimizer muon \\
-      --dataset openwebtext-100k --hidden_size 896 --lr 1e-3
+  5. Safer logging, bf16 cast, cache-off while training, `--max-steps`.
+  6. Absolute log/cache paths under this package directory.
 """
 
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import math
 import os
 import sys
+import traceback
 from pathlib import Path
 
 import torch
@@ -44,10 +41,7 @@ from transformers import (
 )
 from tqdm import tqdm
 
-# ---------------------------------------------------------------------------
-# Below: Muon / dataset / train loop copied from upstream toy_train.py with
-# only the patches listed in the module docstring.
-# ---------------------------------------------------------------------------
+faulthandler.enable(all_threads=True)
 
 
 class MoonDataset(Dataset):
@@ -64,15 +58,15 @@ class MoonDataset(Dataset):
     def _tokenize_texts(self):
         cache_path = os.path.join(self.cache_dir, f"{self.dataset_name}.bin")
         if os.path.exists(cache_path):
+            logger.info(f"Loading token cache: {cache_path}")
             self.tokens = torch.load(cache_path, weights_only=False)
+            logger.info(f"Loaded {len(self.tokens):,} tokens from cache")
             return
 
         texts = self.texts
         total = len(texts)
-        # Non-TTY terminals (common over SSH/IDE) make tqdm print a new line
-        # per update and flood the screen. Use in-place bar only on real TTYs;
-        # otherwise log coarse percent updates.
         use_tqdm = sys.stderr.isatty()
+        logger.info(f"Tokenizing {total} texts into {cache_path}")
         if use_tqdm:
             iterator = tqdm(
                 texts,
@@ -86,8 +80,7 @@ class MoonDataset(Dataset):
                 encoded = self.tokenizer.encode(text, add_special_tokens=True)
                 self.tokens.extend(encoded)
         else:
-            logger.info(f"Tokenizing texts: 0/{total} (0.0%)")
-            step = max(1, total // 100)  # ~1% updates
+            step = max(1, total // 100)
             for i, text in enumerate(texts):
                 encoded = self.tokenizer.encode(text, add_special_tokens=True)
                 self.tokens.extend(encoded)
@@ -98,21 +91,20 @@ class MoonDataset(Dataset):
 
         os.makedirs(self.cache_dir, exist_ok=True)
         torch.save(self.tokens, cache_path)
+        logger.info(f"Saved token cache ({len(self.tokens):,} tokens) -> {cache_path}")
 
     def __len__(self):
         return len(self.tokens) // self.max_length
 
     def __getitem__(self, idx):
-        start_idx = idx * (self.max_length)
-        end_idx = start_idx + (self.max_length)
+        start_idx = idx * self.max_length
+        end_idx = start_idx + self.max_length
         token_slice = self.tokens[start_idx:end_idx]
-        data = torch.tensor(token_slice, dtype=torch.long)
-        return data
+        return torch.tensor(token_slice, dtype=torch.long)
 
 
 def build_zeropower(disable_torch_compile: bool):
     def zeropower_via_newtonschulz5(G, steps):
-        """Newton-Schulz iteration (from upstream / KellerJordan Muon)."""
         assert len(G.shape) == 2
         a, b, c = (3.4445, -4.7750, 2.0315)
         X = G.bfloat16()
@@ -165,6 +157,8 @@ class Muon(torch.optim.Optimizer):
         adamw_params = list(adamw_params) if adamw_params is not None else []
         params.extend(adamw_params)
         super().__init__(params, defaults)
+        if zeropower_fn is None:
+            raise ValueError("zeropower_fn is required")
         self.zeropower_fn = zeropower_fn
         for p in muon_params:
             assert p.ndim == 2, p.ndim
@@ -244,8 +238,37 @@ def pick_device():
     if hasattr(torch, "npu") and torch.npu.is_available():
         return torch.device("npu:0")
     if torch.cuda.is_available():
-        return torch.device("cuda")
+        return torch.device("cuda:0")
     return torch.device("cpu")
+
+
+def synchronize(device: torch.device) -> None:
+    if device.type == "npu" and hasattr(torch, "npu"):
+        torch.npu.synchronize()
+    elif device.type == "cuda":
+        torch.cuda.synchronize()
+
+
+def device_mem_summary(device: torch.device) -> str:
+    try:
+        if device.type == "npu" and hasattr(torch, "npu"):
+            free, total = torch.npu.mem_get_info(device)
+            return f"npu mem free={free/1e9:.2f}GB total={total/1e9:.2f}GB"
+        if device.type == "cuda":
+            free, total = torch.cuda.mem_get_info(device)
+            return f"cuda mem free={free/1e9:.2f}GB total={total/1e9:.2f}GB"
+    except Exception as exc:  # noqa: BLE001
+        return f"mem info unavailable ({exc})"
+    return "cpu"
+
+
+def resolve_path(path: str | None, repo_root: Path) -> str | None:
+    if not path:
+        return None
+    p = Path(path)
+    if not p.is_absolute():
+        p = repo_root / p
+    return str(p)
 
 
 def get_model_and_dataloader(
@@ -261,12 +284,15 @@ def get_model_and_dataloader(
     }
     ds_name = name2path[dataset_name]
     if local_data_dir and os.path.isdir(local_data_dir):
+        logger.info(f"Loading dataset from disk: {local_data_dir}")
         train_dataset = load_from_disk(local_data_dir)
     else:
+        logger.info(f"Loading dataset from Hub: {ds_name}")
         train_dataset = load_dataset(ds_name, trust_remote_code=True)
 
     if model_name == "qwen":
         tok_src = tokenizer_path or "Qwen/Qwen2.5-0.5B"
+        logger.info(f"Loading tokenizer: {tok_src}")
         tokenizer = Qwen2Tokenizer.from_pretrained(tok_src, trust_remote_code=True)
     else:
         assert 0, f"model {model_name} not supported"
@@ -274,7 +300,20 @@ def get_model_and_dataloader(
     train_dataset = MoonDataset(
         dataset_name, train_dataset, tokenizer, cache_dir=cache_dir
     )
-    train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
+    logger.info(
+        f"Dataset ready: {len(train_dataset)} sequences "
+        f"(max_length={train_dataset.max_length}, tokens={len(train_dataset.tokens):,})"
+    )
+    if len(train_dataset) == 0:
+        raise RuntimeError("Token dataset is empty; cannot train")
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=16,
+        shuffle=True,
+        num_workers=0,
+        pin_memory=False,
+    )
 
     if model_name == "qwen":
         config = Qwen2Config(
@@ -296,10 +335,14 @@ def get_model_and_dataloader(
             sliding_window=1024,
             tie_word_embeddings=True,
             torch_dtype="bfloat16",
-            use_cache=True,
+            use_cache=False,
             use_mrope=False,
             use_sliding_window=False,
             vocab_size=151936,
+        )
+        logger.info(
+            f"Building Qwen2ForCausalLM hidden_size={hidden_size} "
+            f"layers={config.num_hidden_layers}"
         )
         model = Qwen2ForCausalLM(config)
     else:
@@ -325,6 +368,9 @@ def get_optimizer(optimizer_name, model, lr=1e-3, wd=0.1, zeropower_fn=None):
                 p.ndim >= 2 and "embed_tokens" not in name and "lm_head" not in name
             )
         ]
+        logger.info(
+            f"Muon param tensors={len(muon_params)}, AdamW param tensors={len(adamw_params)}"
+        )
         return Muon(
             lr=lr,
             wd=wd,
@@ -343,29 +389,14 @@ def main():
     parser.add_argument("--wd", type=float, default=0.1)
     parser.add_argument("--dataset", type=str, default="openwebtext-100k")
     parser.add_argument("--hidden_size", type=int, default=896)
+    parser.add_argument("--local-data-dir", type=str, default="")
+    parser.add_argument("--tokenizer-path", type=str, default="")
+    parser.add_argument("--cache-dir", type=str, default="toy_cache")
     parser.add_argument(
-        "--local-data-dir",
-        type=str,
-        default="",
-        help="load_from_disk path produced by scripts/prefetch_official_toy_data.py",
-    )
-    parser.add_argument(
-        "--tokenizer-path",
-        type=str,
-        default="",
-        help="local Qwen2.5-0.5B tokenizer dir; default Hub id",
-    )
-    parser.add_argument(
-        "--cache-dir",
-        type=str,
-        default="toy_cache",
-        help="directory for tokenized .bin cache",
-    )
-    parser.add_argument(
-        "--disable-torch-compile",
-        action="store_true",
-        default=True,
-        help="default True on this NPU runner",
+        "--max-steps",
+        type=int,
+        default=-1,
+        help="stop after N optimizer steps; -1 means one full epoch",
     )
     parser.add_argument(
         "--enable-torch-compile",
@@ -374,61 +405,110 @@ def main():
     )
     args = parser.parse_args()
 
-    disable_compile = not args.enable_torch_compile
-    zeropower_fn = build_zeropower(disable_compile)
-
     repo_root = Path(__file__).resolve().parents[1]
     log_dir = repo_root / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"train_{args.model}_{args.optimizer}_lr{args.lr}.log"
-    logger.add(str(log_path))
-    logger.info(f"Logging to {log_path}")
 
-    cache_dir = args.cache_dir
-    if not Path(cache_dir).is_absolute():
-        cache_dir = str(repo_root / cache_dir)
+    logger.remove()
+    logger.add(sys.stderr, level="INFO")
+    logger.add(str(log_path), level="INFO", enqueue=False, buffering=1)
+    logger.info(f"Logging to {log_path}")
+    logger.info(f"Python {sys.version}")
+    logger.info(f"torch={torch.__version__} torch_npu={getattr(torch_npu, '__version__', None)}")
+    logger.info(f"cwd={os.getcwd()} repo_root={repo_root}")
+
+    disable_compile = not args.enable_torch_compile
+    zeropower_fn = build_zeropower(disable_compile)
+    logger.info(f"Newton-Schulz torch.compile disabled={disable_compile}")
+
+    cache_dir = resolve_path(args.cache_dir, repo_root) or str(repo_root / "toy_cache")
+    local_data_dir = resolve_path(args.local_data_dir, repo_root)
+    tokenizer_path = resolve_path(args.tokenizer_path, repo_root)
+    Path(cache_dir).mkdir(parents=True, exist_ok=True)
 
     model, train_loader = get_model_and_dataloader(
         args.model,
         args.dataset,
         args.hidden_size,
-        args.local_data_dir or None,
-        args.tokenizer_path or None,
+        local_data_dir,
+        tokenizer_path,
         cache_dir,
     )
+    n_params = sum(p.numel() for p in model.parameters())
+    logger.info(f"Model parameters: {n_params:,} ({n_params/1e6:.1f}M)")
+
     optimizer = get_optimizer(
         args.optimizer, model, lr=args.lr, wd=args.wd, zeropower_fn=zeropower_fn
     )
 
     device = pick_device()
     logger.info(f"Using device: {device}")
-    model.to(device)
+    logger.info(device_mem_summary(device))
+
+    # Config torch_dtype alone does not cast freshly constructed weights.
+    logger.info("Casting model to bfloat16")
+    model = model.to(dtype=torch.bfloat16)
+    model.config.use_cache = False
+
+    logger.info(f"Moving model to {device}")
+    model = model.to(device)
+    synchronize(device)
+    logger.info(f"Model is on device: {next(model.parameters()).device}")
+    logger.info(device_mem_summary(device))
     model.train()
 
-    epoch = 1
+    steps_per_epoch = len(train_loader)
+    max_steps = args.max_steps if args.max_steps > 0 else steps_per_epoch
+    max_steps = min(max_steps, steps_per_epoch)
+    logger.info(f"steps_per_epoch={steps_per_epoch} max_steps={max_steps}")
+
     lr_scheduler = get_cosine_schedule_with_warmup(
         optimizer=optimizer,
-        num_warmup_steps=100,
-        num_training_steps=len(train_loader) * epoch,
+        num_warmup_steps=min(100, max_steps),
+        num_training_steps=max_steps,
         num_cycles=0.5,
     )
-    for epoch_i in range(epoch):
-        for step, batch in enumerate(train_loader):
+
+    logger.info("Entering training loop")
+    for step, batch in enumerate(train_loader):
+        if step >= max_steps:
+            break
+        try:
+            if step == 0:
+                logger.info(f"step0: batch shape={tuple(batch.shape)} dtype={batch.dtype}")
             batch = batch.to(device)
+            if step == 0:
+                logger.info("step0: forward")
             outputs = model(input_ids=batch, labels=batch)
             loss = outputs.loss
+            if step == 0:
+                logger.info(f"step0: loss={float(loss.detach().cpu())} ; backward")
             loss.backward()
+            if step == 0:
+                logger.info("step0: optimizer.step")
             optimizer.step()
             lr_scheduler.step()
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
+            if device.type == "npu":
+                synchronize(device)
             logger.info(
-                f"Epoch: {epoch_i} Step: {step} LR: {optimizer.param_groups[0]['lr']} Training loss: {loss.item()}"
+                f"Epoch: 0 Step: {step}/{max_steps} "
+                f"LR: {optimizer.param_groups[0]['lr']} "
+                f"Training loss: {float(loss.detach().cpu())}"
             )
+        except Exception:
+            logger.error(f"Failed at step={step}\n{traceback.format_exc()}")
+            raise
+
+    logger.info("TRAIN_OK")
 
 
 if __name__ == "__main__":
     try:
         main()
     except Exception as exc:  # noqa: BLE001
+        # Ensure failure is visible even if loguru file sink had issues.
         print(f"TRAIN_FAIL: {exc}", file=sys.stderr)
+        traceback.print_exc()
         raise

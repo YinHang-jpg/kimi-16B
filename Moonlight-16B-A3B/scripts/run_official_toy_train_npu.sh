@@ -12,6 +12,8 @@ bash scripts/reassemble_toy_prefetch.sh
 PYTHON_BIN="${PYTHON_BIN:-python}"
 DATA_DIR="${DATA_DIR:-toy_prefetch/openwebtext-100k}"
 TOK_DIR="${TOK_DIR:-toy_prefetch/Qwen2.5-0.5B-tokenizer}"
+# Optional: MAX_STEPS=20 bash scripts/run_official_toy_train_npu.sh
+MAX_STEPS="${MAX_STEPS:-}"
 
 EXTRA=()
 if [[ -d "$DATA_DIR" ]]; then
@@ -20,9 +22,13 @@ fi
 if [[ -d "$TOK_DIR" ]]; then
   EXTRA+=(--tokenizer-path "$TOK_DIR")
 fi
+if [[ -n "$MAX_STEPS" ]]; then
+  EXTRA+=(--max-steps "$MAX_STEPS")
+fi
 
 mkdir -p logs toy_cache
-"$PYTHON_BIN" examples/toy_train_npu.py \
+export PYTHONUNBUFFERED=1
+"$PYTHON_BIN" -u examples/toy_train_npu.py \
   --model qwen \
   --optimizer muon \
   --dataset openwebtext-100k \
