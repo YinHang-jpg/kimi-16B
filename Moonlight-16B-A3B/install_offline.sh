@@ -68,6 +68,11 @@ fi
 "$PYTHON_BIN" -m pip install --no-index --find-links="$WHEEL_DIR" "${TORCH_WHLS[0]}"
 "$PYTHON_BIN" -m pip install --no-index --find-links="$WHEEL_DIR" "${NPU_WHLS[0]}"
 
+# huggingface_hub>=0.32 needs hf-xet on aarch64/x86_64; install before -r requirements.txt
+echo "== installing huggingface hub deps from offline wheels =="
+"$PYTHON_BIN" -m pip install --no-index --find-links="$WHEEL_DIR" \
+  hf-xet packaging pyyaml requests tqdm numpy
+
 echo "== installing remaining requirements =="
 "$PYTHON_BIN" -m pip install --no-index --find-links="$WHEEL_DIR" -r requirements.txt
 
