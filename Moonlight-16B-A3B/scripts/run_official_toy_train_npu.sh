@@ -12,8 +12,10 @@ bash scripts/reassemble_toy_prefetch.sh
 PYTHON_BIN="${PYTHON_BIN:-python}"
 DATA_DIR="${DATA_DIR:-toy_prefetch/openwebtext-100k}"
 TOK_DIR="${TOK_DIR:-toy_prefetch/Qwen2.5-0.5B-tokenizer}"
-# Optional: MAX_STEPS=20 bash scripts/run_official_toy_train_npu.sh
+# Optional: MAX_STEPS=20 DTYPE=float16 bash scripts/run_official_toy_train_npu.sh
 MAX_STEPS="${MAX_STEPS:-}"
+# auto -> float16 on NPU (bf16 Embedding often hits CANN 561103 / GatherV2AiCore)
+DTYPE="${DTYPE:-auto}"
 
 EXTRA=()
 if [[ -d "$DATA_DIR" ]]; then
@@ -25,6 +27,7 @@ fi
 if [[ -n "$MAX_STEPS" ]]; then
   EXTRA+=(--max-steps "$MAX_STEPS")
 fi
+EXTRA+=(--dtype "$DTYPE")
 
 mkdir -p logs toy_cache
 export PYTHONUNBUFFERED=1

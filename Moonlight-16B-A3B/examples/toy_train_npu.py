@@ -9,8 +9,9 @@ PATCHES vs upstream (optimizer math unchanged):
   2. Device selection: npu > cuda > cpu.
   3. Disable torch.compile by default on NPU.
   4. `--local-data-dir` / `--tokenizer-path` for offline caches.
-  5. Safer logging, bf16 cast, cache-off while training, `--max-steps`.
+  5. Safer logging, dtype cast, cache-off while training, `--max-steps`.
   6. Absolute log/cache paths under this package directory.
+  7. NPU default dtype=float16 (many Ascend chips lack bf16 Embedding kernels).
 """
 
 from __future__ import annotations
@@ -103,11 +104,32 @@ class MoonDataset(Dataset):
         return torch.tensor(token_slice, dtype=torch.long)
 
 
-def build_zeropower(disable_torch_compile: bool):
+def resolve_train_dtype(name: str, device: torch.device) -> torch.dtype:
+    """Pick weight dtype. Ascend Embedding often lacks bf16 kernels (err 561103)."""
+    mapping = {
+        "bfloat16": torch.bfloat16,
+        "bf16": torch.bfloat16,
+        "float16": torch.float16,
+        "fp16": torch.float16,
+        "float32": torch.float32,
+        "fp32": torch.float32,
+    }
+    if name != "auto":
+        if name not in mapping:
+            raise ValueError(f"unsupported --dtype {name!r}")
+        return mapping[name]
+    # auto: prefer fp16 on NPU to avoid GatherV2AiCore/bf16 Embedding failures
+    if device.type == "npu":
+        return torch.float16
+    return torch.bfloat16
+
+
+def build_zeropower(disable_torch_compile: bool, ns_dtype: torch.dtype):
     def zeropower_via_newtonschulz5(G, steps):
         assert len(G.shape) == 2
         a, b, c = (3.4445, -4.7750, 2.0315)
-        X = G.bfloat16()
+        # Upstream uses bf16; on NPU fall back to fp16/fp32 when bf16 kernels are missing.
+        X = G.to(dtype=ns_dtype)
         if G.size(0) > G.size(1):
             X = X.T
         X = X / (X.norm() + 1e-7)
@@ -403,6 +425,13 @@ def main():
         action="store_true",
         help="try torch.compile for Newton-Schulz (may fail on Ascend)",
     )
+    parser.add_argument(
+        "--dtype",
+        type=str,
+        default="auto",
+        choices=["auto", "bfloat16", "bf16", "float16", "fp16", "float32", "fp32"],
+        help="model weight dtype; auto=float16 on NPU, bfloat16 elsewhere",
+    )
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parents[1]
@@ -418,9 +447,13 @@ def main():
     logger.info(f"torch={torch.__version__} torch_npu={getattr(torch_npu, '__version__', None)}")
     logger.info(f"cwd={os.getcwd()} repo_root={repo_root}")
 
+    device = pick_device()
+    train_dtype = resolve_train_dtype(args.dtype, device)
+    # Newton-Schulz: match train dtype on NPU; keep bf16 elsewhere (upstream).
+    ns_dtype = train_dtype if device.type == "npu" else torch.bfloat16
     disable_compile = not args.enable_torch_compile
-    zeropower_fn = build_zeropower(disable_compile)
-    logger.info(f"Newton-Schulz torch.compile disabled={disable_compile}")
+    zeropower_fn = build_zeropower(disable_compile, ns_dtype=ns_dtype)
+    logger.info(f"Newton-Schulz torch.compile disabled={disable_compile} ns_dtype={ns_dtype}")
 
     cache_dir = resolve_path(args.cache_dir, repo_root) or str(repo_root / "toy_cache")
     local_data_dir = resolve_path(args.local_data_dir, repo_root)
@@ -442,13 +475,12 @@ def main():
         args.optimizer, model, lr=args.lr, wd=args.wd, zeropower_fn=zeropower_fn
     )
 
-    device = pick_device()
     logger.info(f"Using device: {device}")
     logger.info(device_mem_summary(device))
 
     # Config torch_dtype alone does not cast freshly constructed weights.
-    logger.info("Casting model to bfloat16")
-    model = model.to(dtype=torch.bfloat16)
+    logger.info(f"Casting model to {train_dtype} (--dtype={args.dtype})")
+    model = model.to(dtype=train_dtype)
     model.config.use_cache = False
 
     logger.info(f"Moving model to {device}")
