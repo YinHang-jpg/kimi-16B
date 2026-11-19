@@ -256,12 +256,76 @@ class Muon(torch.optim.Optimizer):
         return loss
 
 
-def pick_device():
+def pick_device(prefer: str = "auto") -> torch.device:
+    prefer = (prefer or "auto").lower()
+    if prefer == "cpu":
+        return torch.device("cpu")
+    if prefer == "npu":
+        if not (hasattr(torch, "npu") and torch.npu.is_available()):
+            raise RuntimeError("--device npu requested but torch.npu is unavailable")
+        return torch.device("npu:0")
+    if prefer == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError("--device cuda requested but CUDA is unavailable")
+        return torch.device("cuda:0")
+    # auto
     if hasattr(torch, "npu") and torch.npu.is_available():
         return torch.device("npu:0")
     if torch.cuda.is_available():
         return torch.device("cuda:0")
     return torch.device("cpu")
+
+
+def probe_npu_embedding(dtype: torch.dtype) -> tuple[bool, str]:
+    """Return (ok, detail). Isolates GatherV2/Embedding kernel health."""
+    if not (hasattr(torch, "npu") and torch.npu.is_available()):
+        return False, "npu unavailable"
+    try:
+        w = torch.randn(128, 32, device="npu:0", dtype=dtype)
+        for idx_dtype in (torch.long, torch.int32):
+            idx = torch.randint(0, 128, (2, 8), device="npu:0", dtype=idx_dtype)
+            out = torch.nn.functional.embedding(idx, w)
+            torch.npu.synchronize()
+            _ = float(out.float().sum().cpu())
+        return True, f"ok dtype={dtype}"
+    except Exception as exc:  # noqa: BLE001
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+def enable_cpu_embedding(model: torch.nn.Module) -> None:
+    """Keep embed_tokens on CPU; untie lm_head so the rest can stay on NPU."""
+    embed = model.get_input_embeddings()
+    if getattr(model.config, "tie_word_embeddings", False):
+        # Break weight tying so lm_head can remain on accelerator.
+        with torch.no_grad():
+            model.lm_head.weight = torch.nn.Parameter(
+                embed.weight.detach().clone()
+            )
+        model.config.tie_word_embeddings = False
+        if hasattr(model, "tie_weights"):
+            # Prevent transformers from re-tying later.
+            model.tie_weights = lambda: None  # type: ignore[method-assign]
+        logger.info("Untied lm_head from embed_tokens for CPU embedding path")
+    embed.to("cpu")
+    logger.info("embed_tokens moved to CPU (NPU Embedding kernel workaround)")
+
+
+def forward_with_optional_cpu_embed(
+    model: torch.nn.Module,
+    batch: torch.Tensor,
+    device: torch.device,
+    train_dtype: torch.dtype,
+    embed_on_cpu: bool,
+):
+    if not embed_on_cpu:
+        batch_dev = batch.to(device)
+        return model(input_ids=batch_dev, labels=batch_dev)
+
+    # Embedding on CPU (works around broken aclnnEmbedding / GatherV2AiCore).
+    labels = batch.to(device)
+    embed = model.get_input_embeddings()
+    inputs_embeds = embed(batch.cpu()).to(device=device, dtype=train_dtype)
+    return model(inputs_embeds=inputs_embeds, labels=labels)
 
 
 def synchronize(device: torch.device) -> None:
@@ -432,6 +496,23 @@ def main():
         choices=["auto", "bfloat16", "bf16", "float16", "fp16", "float32", "fp32"],
         help="model weight dtype; auto=float16 on NPU, bfloat16 elsewhere",
     )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        choices=["auto", "npu", "cuda", "cpu"],
+        help="force device; use cpu if NPU kernels are broken",
+    )
+    parser.add_argument(
+        "--embed-on-cpu",
+        action="store_true",
+        help="run Embedding on CPU and pass inputs_embeds (bypass broken NPU Embedding)",
+    )
+    parser.add_argument(
+        "--no-embed-fallback",
+        action="store_true",
+        help="do not auto-enable --embed-on-cpu when NPU Embedding probe fails",
+    )
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parents[1]
@@ -446,14 +527,37 @@ def main():
     logger.info(f"Python {sys.version}")
     logger.info(f"torch={torch.__version__} torch_npu={getattr(torch_npu, '__version__', None)}")
     logger.info(f"cwd={os.getcwd()} repo_root={repo_root}")
+    logger.info(
+        f"ASCEND_HOME_PATH={os.environ.get('ASCEND_HOME_PATH', '')!r} "
+        f"ASCEND_OPP_PATH={os.environ.get('ASCEND_OPP_PATH', '')!r}"
+    )
 
-    device = pick_device()
+    device = pick_device(args.device)
     train_dtype = resolve_train_dtype(args.dtype, device)
     # Newton-Schulz: match train dtype on NPU; keep bf16 elsewhere (upstream).
     ns_dtype = train_dtype if device.type == "npu" else torch.bfloat16
     disable_compile = not args.enable_torch_compile
     zeropower_fn = build_zeropower(disable_compile, ns_dtype=ns_dtype)
     logger.info(f"Newton-Schulz torch.compile disabled={disable_compile} ns_dtype={ns_dtype}")
+
+    embed_on_cpu = bool(args.embed_on_cpu)
+    if device.type == "npu":
+        ok, detail = probe_npu_embedding(train_dtype)
+        logger.info(f"NPU Embedding probe ({train_dtype}): ok={ok} detail={detail}")
+        if not ok:
+            # Probe other dtypes for diagnosis
+            for alt in (torch.float16, torch.float32, torch.bfloat16):
+                if alt == train_dtype:
+                    continue
+                ok_alt, detail_alt = probe_npu_embedding(alt)
+                logger.info(f"NPU Embedding probe ({alt}): ok={ok_alt} detail={detail_alt}")
+            if not args.no_embed_fallback:
+                logger.warning(
+                    "NPU Embedding kernel appears broken (CANN 561103 / GatherV2AiCore). "
+                    "Auto-enabling --embed-on-cpu. Install matching Ascend-cann-kernels "
+                    "for a proper fix; or use --device cpu."
+                )
+                embed_on_cpu = True
 
     cache_dir = resolve_path(args.cache_dir, repo_root) or str(repo_root / "toy_cache")
     local_data_dir = resolve_path(args.local_data_dir, repo_root)
@@ -471,11 +575,7 @@ def main():
     n_params = sum(p.numel() for p in model.parameters())
     logger.info(f"Model parameters: {n_params:,} ({n_params/1e6:.1f}M)")
 
-    optimizer = get_optimizer(
-        args.optimizer, model, lr=args.lr, wd=args.wd, zeropower_fn=zeropower_fn
-    )
-
-    logger.info(f"Using device: {device}")
+    logger.info(f"Using device: {device} embed_on_cpu={embed_on_cpu}")
     logger.info(device_mem_summary(device))
 
     # Config torch_dtype alone does not cast freshly constructed weights.
@@ -485,8 +585,18 @@ def main():
 
     logger.info(f"Moving model to {device}")
     model = model.to(device)
+    if embed_on_cpu and device.type != "cpu":
+        enable_cpu_embedding(model)
+    # Optimizer after embed untie so new lm_head.weight is included.
+    optimizer = get_optimizer(
+        args.optimizer, model, lr=args.lr, wd=args.wd, zeropower_fn=zeropower_fn
+    )
     synchronize(device)
     logger.info(f"Model is on device: {next(model.parameters()).device}")
+    logger.info(
+        f"embed_tokens device={model.get_input_embeddings().weight.device} "
+        f"lm_head device={model.lm_head.weight.device}"
+    )
     logger.info(device_mem_summary(device))
     model.train()
 
@@ -509,10 +619,11 @@ def main():
         try:
             if step == 0:
                 logger.info(f"step0: batch shape={tuple(batch.shape)} dtype={batch.dtype}")
-            batch = batch.to(device)
             if step == 0:
                 logger.info("step0: forward")
-            outputs = model(input_ids=batch, labels=batch)
+            outputs = forward_with_optional_cpu_embed(
+                model, batch, device, train_dtype, embed_on_cpu
+            )
             loss = outputs.loss
             if step == 0:
                 logger.info(f"step0: loss={float(loss.detach().cpu())} ; backward")
