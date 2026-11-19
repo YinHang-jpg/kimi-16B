@@ -42,14 +42,15 @@ shopt -s nullglob
 for part in "$WHEEL_DIR"/*.whl.part00; do
   prefix="${part%.part00}"
   out="${prefix}"
-  if [[ -f "$out" ]]; then
-    echo "== skip rebuild (exists): $(basename "$out") =="
-    continue
-  fi
+  # Always rebuild from parts so a broken partial wheel cannot stick around.
   echo "== rebuilding $(basename "$out") from parts =="
   cat "${prefix}".part* > "$out"
 done
 shopt -u nullglob
+
+echo "== installing torch runtime deps from offline wheels =="
+"$PYTHON_BIN" -m pip install --no-index --find-links="$WHEEL_DIR" \
+  sympy mpmath networkx jinja2 MarkupSafe filelock typing_extensions fsspec setuptools
 
 echo "== installing torch + torch_npu from offline wheels =="
 mapfile -t TORCH_WHLS < <(ls -1 "$WHEEL_DIR"/torch-2.10.0*cpu*.whl 2>/dev/null || true)
@@ -72,5 +73,3 @@ echo "== installing remaining requirements =="
 
 echo "== done =="
 echo "Next: python scripts/smoke_test.py"
-
-# Note: this file must use LF line endings for Linux bash.
