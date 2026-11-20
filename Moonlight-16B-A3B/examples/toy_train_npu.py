@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import faulthandler
+import json
 import math
 import os
 import sys
@@ -433,7 +434,25 @@ def get_model_and_dataloader(
         model = Qwen2ForCausalLM(config)
     else:
         assert 0, f"model {model_name} not supported"
-    return model, train_loader
+    return model, train_loader, tokenizer
+
+
+def save_checkpoint(
+    output_dir: Path,
+    model: torch.nn.Module,
+    tokenizer,
+    meta: dict,
+) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    # HF save prefers CPU tensors; keep training device intact via state copy.
+    to_save = model.module if hasattr(model, "module") else model
+    cpu_model = to_save.to("cpu")
+    cpu_model.config.use_cache = True
+    cpu_model.save_pretrained(output_dir, safe_serialization=True)
+    tokenizer.save_pretrained(output_dir)
+    meta_path = output_dir / "train_meta.json"
+    meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    logger.info(f"Saved checkpoint -> {output_dir}")
 
 
 def get_optimizer(optimizer_name, model, lr=1e-3, wd=0.1, zeropower_fn=None):
@@ -513,6 +532,18 @@ def main():
         action="store_true",
         help="do not auto-enable --embed-on-cpu when NPU Embedding probe fails",
     )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="checkpoints/toy_muon",
+        help="HF-format checkpoint directory (config + weights + tokenizer)",
+    )
+    parser.add_argument(
+        "--save-steps",
+        type=int,
+        default=0,
+        help="also save intermediate ckpt every N steps; 0 = only final",
+    )
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parents[1]
@@ -564,7 +595,7 @@ def main():
     tokenizer_path = resolve_path(args.tokenizer_path, repo_root)
     Path(cache_dir).mkdir(parents=True, exist_ok=True)
 
-    model, train_loader = get_model_and_dataloader(
+    model, train_loader, tokenizer = get_model_and_dataloader(
         args.model,
         args.dataset,
         args.hidden_size,
@@ -574,6 +605,10 @@ def main():
     )
     n_params = sum(p.numel() for p in model.parameters())
     logger.info(f"Model parameters: {n_params:,} ({n_params/1e6:.1f}M)")
+    output_dir = Path(
+        resolve_path(args.output_dir, repo_root) or str(repo_root / "checkpoints" / "toy_muon")
+    )
+    logger.info(f"Checkpoints will be saved under {output_dir}")
 
     logger.info(f"Using device: {device} embed_on_cpu={embed_on_cpu}")
     logger.info(device_mem_summary(device))
@@ -613,6 +648,7 @@ def main():
     )
 
     logger.info("Entering training loop")
+    last_loss = None
     for step, batch in enumerate(train_loader):
         if step >= max_steps:
             break
@@ -625,8 +661,9 @@ def main():
                 model, batch, device, train_dtype, embed_on_cpu
             )
             loss = outputs.loss
+            last_loss = float(loss.detach().cpu())
             if step == 0:
-                logger.info(f"step0: loss={float(loss.detach().cpu())} ; backward")
+                logger.info(f"step0: loss={last_loss} ; backward")
             loss.backward()
             if step == 0:
                 logger.info("step0: optimizer.step")
@@ -638,12 +675,51 @@ def main():
             logger.info(
                 f"Epoch: 0 Step: {step}/{max_steps} "
                 f"LR: {optimizer.param_groups[0]['lr']} "
-                f"Training loss: {float(loss.detach().cpu())}"
+                f"Training loss: {last_loss}"
             )
+            if args.save_steps > 0 and (step + 1) % args.save_steps == 0:
+                step_dir = output_dir / f"step_{step + 1}"
+                save_checkpoint(
+                    step_dir,
+                    model,
+                    tokenizer,
+                    meta={
+                        "step": step + 1,
+                        "max_steps": max_steps,
+                        "loss": last_loss,
+                        "optimizer": args.optimizer,
+                        "lr": args.lr,
+                        "dtype": str(train_dtype),
+                        "device": str(device),
+                        "hidden_size": args.hidden_size,
+                        "n_params": n_params,
+                    },
+                )
+                # save_checkpoint moved weights to CPU; put model back for training
+                model = model.to(device=device, dtype=train_dtype)
+                if embed_on_cpu and device.type != "cpu":
+                    enable_cpu_embedding(model)
         except Exception:
             logger.error(f"Failed at step={step}\n{traceback.format_exc()}")
             raise
 
+    save_checkpoint(
+        output_dir / "final",
+        model,
+        tokenizer,
+        meta={
+            "step": max_steps,
+            "max_steps": max_steps,
+            "loss": last_loss,
+            "optimizer": args.optimizer,
+            "lr": args.lr,
+            "dtype": str(train_dtype),
+            "device": str(device),
+            "hidden_size": args.hidden_size,
+            "n_params": n_params,
+            "status": "TRAIN_OK",
+        },
+    )
     logger.info("TRAIN_OK")
 
 

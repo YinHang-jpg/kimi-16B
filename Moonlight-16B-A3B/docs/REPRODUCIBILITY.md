@@ -80,8 +80,25 @@ python scripts/prefetch_official_toy_data.py
 
 ```bash
 source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh
+# 若 kernels 装在用户目录：
+# source $HOME/Ascend/ascend-toolkit/set_env.sh
 cd Moonlight-16B-A3B
 source .venv/bin/activate
 # 需已 prefetch 数据，或机器能访问 Hugging Face
-bash scripts/run_official_toy_train_npu.sh
+# NPU 上建议 float32，避免 Muon 在 fp16/bf16 下 step1 起 NaN
+DTYPE=float32 bash scripts/run_official_toy_train_npu.sh
 ```
+
+训练结束会写入 HF 格式权重：`checkpoints/toy_muon/final/`。
+
+## 评测已保存的 toy checkpoint
+
+```bash
+pip install -r requirements-eval.txt   # 需能装 lm_eval；离线则自备 wheel
+CKPT=checkpoints/toy_muon/final TASKS=wikitext,mmlu,math500 \
+  DTYPE=float32 bash scripts/run_eval_toy.sh
+# 快速冒烟（不跑 lm_eval）：
+SKIP_LM_EVAL=1 bash scripts/run_eval_toy.sh
+```
+
+说明：toy（~331M + openwebtext）的 MMLU/MATH/LiveCodeBench **不会**对齐 Moonlight-16B 论文表；这些指标用于 Muon vs AdamW / 自研 Muon 的相对对比。LiveCodeBench 还需额外依赖，若 lm-eval 无该 task 会自动回退到 wikitext+mmlu。

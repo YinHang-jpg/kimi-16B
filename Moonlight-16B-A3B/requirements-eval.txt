@@ -1,0 +1,3 @@
+# Optional eval stack for toy / released checkpoints (install when networked).
+# On Ascend offline hosts, download wheels elsewhere then pip --no-index.
+lm_eval>=0.4.5

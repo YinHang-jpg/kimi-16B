@@ -19,10 +19,12 @@ TOK_DIR="${TOK_DIR:-toy_prefetch/Qwen2.5-0.5B-tokenizer}"
 #   MAX_STEPS=20 EMBED_ON_CPU=1 bash scripts/run_official_toy_train_npu.sh
 #   MAX_STEPS=20 DEVICE=cpu bash scripts/run_official_toy_train_npu.sh
 MAX_STEPS="${MAX_STEPS:-}"
-# auto -> float16 on NPU (bf16 Embedding often hits CANN 561103 / GatherV2AiCore)
-DTYPE="${DTYPE:-auto}"
+# Prefer float32 on NPU: fp16/bf16 + Muon often NaNs after step0 on Ascend.
+DTYPE="${DTYPE:-float32}"
 DEVICE="${DEVICE:-auto}"
 EMBED_ON_CPU="${EMBED_ON_CPU:-0}"
+OUTPUT_DIR="${OUTPUT_DIR:-checkpoints/toy_muon}"
+SAVE_STEPS="${SAVE_STEPS:-0}"
 
 EXTRA=()
 if [[ -d "$DATA_DIR" ]]; then
@@ -36,11 +38,13 @@ if [[ -n "$MAX_STEPS" ]]; then
 fi
 EXTRA+=(--dtype "$DTYPE")
 EXTRA+=(--device "$DEVICE")
+EXTRA+=(--output-dir "$OUTPUT_DIR")
+EXTRA+=(--save-steps "$SAVE_STEPS")
 if [[ "$EMBED_ON_CPU" == "1" || "$EMBED_ON_CPU" == "true" ]]; then
   EXTRA+=(--embed-on-cpu)
 fi
 
-mkdir -p logs toy_cache
+mkdir -p logs toy_cache checkpoints
 export PYTHONUNBUFFERED=1
 "$PYTHON_BIN" -u examples/toy_train_npu.py \
   --model qwen \
